@@ -68,12 +68,12 @@ def population_seq_generator(u, consts):
     y2_init = tt.tile(tt.constant(
         consts['y2_init'], 'y2_init', 0, th.config.floatX), u.shape[0])
     # Extract realisations of SDE white noise process terms as noise sequences
-    n1_seq = u_n[:, :consts['n_step']] * consts['noise_std']
-    n2_seq = u_n[:, consts['n_step']:] * consts['noise_std']
+    n1_seq = u_n[:, ::2] * consts['noise_std']
+    n2_seq = u_n[:, 1::2] * consts['noise_std']
     # Iterate integrator steps given noise sequences and model parameters
     [y1_seq, y2_seq], updates = th.scan(
         fn=lotka_volterra_step,
-        sequences=[n1_seq, n2_seq],
+        sequences=[n1_seq.T, n2_seq.T],
         outputs_info=[y1_init, y2_init],
         non_sequences=[z.T, consts['dt']],
     )

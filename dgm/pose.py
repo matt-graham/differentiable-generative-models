@@ -5,7 +5,8 @@ import theano as th
 import theano.tensor as tt
 import theano.tensor.slinalg as sla
 from bvh import theano_renderer
-from dgm.utils import partition, generator_decorator
+from dgm.utils import (
+    partition, generator_decorator, multi_output_generator_decorator)
 
 
 @generator_decorator
@@ -15,22 +16,30 @@ def bone_lengths_generator(u, consts):
                   u.dot(consts['log_lengths_covar_chol']))
 
 
+def joint_angles_cos_sin_vae_decoder(h, layers, n_joint_angle):
+    h = layers[0]['nonlinearity'](
+        h.dot(layers[0]['weights']) + layers[0]['biases'])
+    # intermediate layers with skip-connections
+    for layer in layers[1:-1]:
+        h = layer['nonlinearity'](
+            h.dot(layer['weights']) + layer['biases']) + h
+    h = layers[-1]['nonlinearity'](
+        h.dot(layers[-1]['weights']) + layers[-1]['biases'])
+    return h[:, :n_joint_angle * 2], tt.exp(0.5 * h[:, n_joint_angle * 2:])
+
+
 @generator_decorator
 def joint_angles_generator(u, consts):
     """Generate joint angles from VAE decoder model."""
     h, n = partition(u, [consts['n_joint_angle_latent'],
                          consts['n_joint_angle'] * 2])
-    for layer in consts['joint_angles_vae_decoder_layers']:
-        h = layer['nonlinearity'](h.dot(layer['weights']) + layer['biases'])
-    angles_cos_sin_mean = h[:, :consts['n_joint_angle'] * 2]
-    angles_cos_sin_log_var = h[:, consts['n_joint_angle'] * 2:]
-    angles_cos_sin = (angles_cos_sin_mean +
-                      tt.exp(0.5 * angles_cos_sin_log_var) * n)
-    return tt.arctan2(angles_cos_sin.T[consts['n_joint_angle']:].T,
-                      angles_cos_sin.T[:consts['n_joint_angle']].T)
+    ang_cos_sin_mean, ang_cos_sin_std = joint_angles_cos_sin_vae_decoder(
+        h, consts['joint_angles_vae_decoder_layers'], consts['n_joint_angle'])
+    ang_cos_sin = ang_cos_sin_mean + ang_cos_sin_std * n
+    return tt.arctan2(ang_cos_sin[:, consts['n_joint_angle']:],
+                      ang_cos_sin[:, :consts['n_joint_angle']])
 
 
-@generator_decorator
 def camera_generator(u, consts):
     """Generate camera parameters from (log-)normal model."""
     cam_foc = tt.ones_like(u[:, 0]) * consts['cam_foc']
@@ -40,11 +49,10 @@ def camera_generator(u, consts):
         tt.exp(consts['log_cam_pos_z_mean'] +
                consts['log_cam_pos_z_std'] * u[:, 2:3])
     ], 1)
-    cam_ang = consts['cam_ang_mean'] + tt.zeros_like(u[:, :3])
+    cam_ang = tt.ones_like(u[:, :3]) * consts['cam_ang']
     return cam_foc, cam_pos, cam_ang
 
 
-@generator_decorator
 def joint_3d_pos_generator(u, consts):
     """Generate 3D joint positions.
 
@@ -76,7 +84,7 @@ def monocular_2d_proj_generator(u, consts):
                    consts['n_joint_angle_input'],
                    consts['n_camera_input']]
     u_ske, u_cam = partition(u, input_sizes)
-    joint_pos_3d = joint_pos_3d_generator(u_ske, consts)
+    joint_pos_3d = joint_3d_pos_generator(u_ske, consts)
     cam_foc, cam_pos, cam_ang = camera_generator(u_cam, consts)
     camera_matrix = theano_renderer.camera_matrix_batch(
         cam_foc, cam_pos, cam_ang)
@@ -118,7 +126,7 @@ def binocular_2d_proj_generator(u, consts):
                    consts['n_joint_angle_input'],
                    consts['n_camera_input']]
     u_ske, u_cam, = partition(u, input_sizes)
-    joint_pos_3d = joint_pos_3d_generator(u_ske, consts)
+    joint_pos_3d = joint_3d_pos_generator(u_ske, consts)
     cam_foc, cam_pos, cam_ang = camera_generator(u_cam, consts)
     cam_mtx_1 = theano_renderer.camera_matrix_batch(
         cam_foc, cam_pos + consts['cam_pos_offset'],
@@ -178,7 +186,7 @@ def inputs_to_state(u, consts):
         cam_pos_x, cam_pos_y, log_cam_pos_z], 0)
 
 
-def joint_pos_3d_prior_hier(state, consts):
+def joint_3d_pos_generator_hier(state, consts):
     state_partition = [
         consts['n_bone_length_input'],
         consts['n_joint_angle_latent'],
@@ -205,8 +213,9 @@ def energy_func_hier_monocular(state, y_data, consts):
     (log_bone_lengths, joint_ang_latent,
      joint_ang_cos_sin, cam_pos_x,
      cam_pos_y, log_cam_pos_z) = partition(state, state_partition)
-    mean_ang_cos_sin, log_var_ang_cos_sin = (
-        consts['joint_angles_cos_sin_vae'].x_gvn_z(joint_ang_latent))
+    ang_cos_sin_mean, ang_cos_sin_std = joint_angles_cos_sin_vae_decoder(
+        joint_ang_latent, consts['joint_angles_vae_decoder_layers'],
+        consts['n_joint_angle'])
     joint_angles = tt.arctan2(joint_ang_cos_sin[consts['n_joint_angle']:],
                               joint_ang_cos_sin[:consts['n_joint_angle']])
     bone_lengths = tt.exp(log_bone_lengths)
@@ -214,9 +223,9 @@ def energy_func_hier_monocular(state, y_data, consts):
         consts['skeleton'], joint_angles, consts['fixed_joint_angles'],
         lengths=bone_lengths, lengths_map=consts['bone_lengths_map'],
         skip=consts['joints_to_skip']), 1)
-    cam_foc = tt.exp(consts['log_cam_foc_mean'])
+    cam_foc = tt.exp(consts['cam_foc'])
     cam_pos = tt.concatenate([cam_pos_x, cam_pos_y, tt.exp(log_cam_pos_z)])
-    cam_ang = consts['cam_ang_mean']
+    cam_ang = consts['cam_ang']
     cam_mtx = theano_renderer.camera_matrix(cam_foc, cam_pos, cam_ang)
     joint_pos_2d_hom = cam_mtx.dot(joint_pos_3d)
     joint_pos_2d = joint_pos_2d_hom[:2] / joint_pos_2d_hom[2]
@@ -224,8 +233,7 @@ def energy_func_hier_monocular(state, y_data, consts):
     log_lengths_minus_mean = log_bone_lengths - consts['log_lengths_mean']
     return 0.5 * (
         (((y_data - y_model) / consts['output_noise_std'])**2).sum() +
-        ((joint_ang_cos_sin - mean_ang_cos_sin)**2 /
-            tt.exp(log_var_ang_cos_sin)).sum() +
+        (((joint_ang_cos_sin - ang_cos_sin_mean) / ang_cos_sin_std)**2).sum() +
         joint_ang_latent.dot(joint_ang_latent) +
         log_lengths_minus_mean.dot(sla.solve_upper_triangular(
             consts['log_lengths_covar_chol'],
@@ -250,8 +258,9 @@ def energy_func_hier_binocular(state, y_data, consts):
     (log_bone_lengths, joint_ang_latent,
      joint_ang_cos_sin,  cam_pos_x,
      cam_pos_y, log_cam_pos_z) = partition(state, state_partition)
-    mean_ang_cos_sin, log_var_ang_cos_sin = (
-        consts['joint_angles_cos_sin_vae'].x_gvn_z(joint_ang_latent))
+    ang_cos_sin_mean, ang_cos_sin_std = joint_angles_cos_sin_vae_decoder(
+        joint_ang_latent[None, :], consts['joint_angles_vae_decoder_layers'],
+        consts['n_joint_angle'])
     joint_angles = tt.arctan2(joint_ang_cos_sin[consts['n_joint_angle']:],
                               joint_ang_cos_sin[:consts['n_joint_angle']])
     bone_lengths = tt.exp(log_bone_lengths)
@@ -259,9 +268,9 @@ def energy_func_hier_binocular(state, y_data, consts):
         consts['skeleton'], joint_angles, consts['fixed_joint_angles'],
         lengths=bone_lengths, lengths_map=consts['bone_lengths_map'],
         skip=consts['joints_to_skip']), 1)
-    cam_foc = tt.exp(consts['log_cam_foc_mean'])
+    cam_foc = consts['cam_foc']
     cam_pos = tt.concatenate([cam_pos_x, cam_pos_y, tt.exp(log_cam_pos_z)])
-    cam_ang = consts['cam_ang_mean']
+    cam_ang = consts['cam_ang']
     cam_mtx_1 = theano_renderer.camera_matrix(
         cam_foc, cam_pos + consts['cam_pos_offset'],
         cam_ang + consts['cam_ang_offset'])
@@ -278,8 +287,7 @@ def energy_func_hier_binocular(state, y_data, consts):
     return 0.5 * (
         (y_data - y_model).dot(y_data - y_model) /
         consts['output_noise_std']**2 +
-        ((joint_ang_cos_sin - mean_ang_cos_sin)**2 /
-            tt.exp(log_var_ang_cos_sin)).sum() +
+        (((joint_ang_cos_sin - ang_cos_sin_mean) / ang_cos_sin_std)**2).sum() +
         joint_ang_latent.dot(joint_ang_latent) +
         log_lengths_minus_mean.dot(sla.solve_upper_triangular(
             consts['log_lengths_covar_chol'],

@@ -1,0 +1,15 @@
+[submodule "bvh-tools"]
+	path = bvh-tools
+	url = https://github.com/matt-graham/bvh-tools
+[submodule "hmc"]
+	path = hmc
+	url = https://github.com/matt-graham/hmc
+[submodule "auxiliary-pm-mcmc"]
+	path = auxiliary-pm-mcmc
+	url = https://github.com/matt-graham/auxiliary-pm-mcmc
+[submodule "hamiltonian-monte-carlo"]
+	path = hamiltonian-monte-carlo
+	url = https://github.com/matt-graham/hamiltonian-monte-carlo
+[submodule "choldate"]
+	path = choldate
+	url = https://github.com/jcrudy/choldate

@@ -42,3 +42,19 @@ def generator_decorator(generator):
         n_batch = u.shape[0]
         return tt.squeeze(generator(u, consts).reshape((n_batch, -1)))
     return wrapped_generator
+
+
+def multi_output_generator_decorator(generator):
+    """Generator decorator adding boilerplate for coping with vector inputs.
+
+    Specialisation for generators which produce multiple tensor outputs.
+    """
+    def wrapped_generator(u, consts):
+        if u.ndim == 1:
+            u = u[None, :]
+        n_batch = u.shape[0]
+        return [
+            tt.squeeze(output.reshape((n_batch, -1))) for output in
+            generator(u, consts)
+        ]
+    return wrapped_generator

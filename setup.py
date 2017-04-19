@@ -8,5 +8,5 @@ if __name__ == '__main__':
         description=['Inference in differentiable generative models.'],
         author='Matt Graham',
         url='https://github.com/matt-graham/differentiable-generative-models',
-        packages=['dgm', 'bvh', 'hmc']
+        packages=['dgm']
     )

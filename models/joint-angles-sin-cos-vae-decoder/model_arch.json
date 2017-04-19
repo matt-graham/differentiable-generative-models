@@ -1,0 +1,1 @@
+{"decoder_arch": {"output_nonlinearity": "linear", "n_hiddens": [50, 50, 50, 50, 50, 50], "output_dim": 188, "use_skip_connections": true, "input_dim": 30, "hidden_nonlinearity": "tanh"}, "encoder_arch": {"output_nonlinearity": "linear", "n_hiddens": [50, 50, 50, 50, 50, 50], "output_dim": 60, "use_skip_connections": true, "input_dim": 94, "hidden_nonlinearity": "tanh"}}

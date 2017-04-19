@@ -140,6 +140,11 @@ class DifferentiableGenerativeModel(object):
         self.base_energy_func = _timed_func_compilation(
             [u], self.base_energy(u), 'base energy function')
 
+    def constr_func(self, u):
+        if not hasattr(self, 'y_obs'):
+            raise ValueError('y_obs must be set before calling constr_func.')
+        return self.generator_func(u) - self.y_obs
+
     def constr_jacob(self, u, calc_gram_chol=True):
         jac = self.generator_jacob(u)
         cache = {'dc_dpos': jac}

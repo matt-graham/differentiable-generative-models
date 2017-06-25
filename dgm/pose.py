@@ -71,6 +71,54 @@ def joint_3d_pos_generator(u, consts):
         skip=consts['joints_to_skip']), 2)
 
 
+def root_position_generator(u, consts):
+    return u * consts['root_pos_std'] + consts['root_pos_mean']
+
+
+def joint_3d_pos_var_root_generator(u, consts):
+    """Generate 3D joint positions with variable root position.
+
+    Generates bone lengths and joint angles from respective models then uses
+    skeleton definition to convert to 3D joint positions in global coordinate
+    system.
+    """
+    input_sizes = [consts['n_bone_length_input'],
+                   consts['n_joint_angle_input'], 3]
+    u_len, u_ang, u_pos = partition(u, input_sizes)
+    bone_lengths = bone_lengths_generator(u_len, consts)
+    joint_angles = joint_angles_generator(u_ang, consts)
+    root_position = root_position_generator(u_pos, consts)
+    joint_pos_3d = tt.stack(theano_renderer.joint_positions_batch(
+        consts['skeleton'], joint_angles, consts['fixed_joint_angles'],
+        lengths=bone_lengths, lengths_map=consts['bone_lengths_map'],
+        skip=consts['joints_to_skip']), 2)
+    joint_pos_3d = tt.inc_subtensor(joint_pos_3d[:, :3, :], root_position[:, :, None])
+    return joint_pos_3d
+
+
+@generator_decorator
+def monocular_2d_proj_var_root_generator(u, consts):
+    """Generate monocular 2D joint position projections with variable root position.
+
+    Generates bone lengths and joint angles from respective models then uses
+    skeleton definition to convert to 3D joint positions in global coordinate
+    system, before projecting to 2D image coordinates using a single generated
+    camera model.
+    """
+    input_sizes = [consts['n_bone_length_input'] +
+                   consts['n_joint_angle_input'] + 3,
+                   consts['n_camera_input']]
+    u_ske, u_cam = partition(u, input_sizes)
+    joint_pos_3d = joint_3d_pos_var_root_generator(u_ske, consts)
+    cam_foc, cam_pos, cam_ang = camera_generator(u_cam, consts)
+    camera_matrix = theano_renderer.camera_matrix_batch(
+        cam_foc, cam_pos, cam_ang)
+    joint_pos_2d_hom = tt.batched_dot(camera_matrix, joint_pos_3d)
+    joint_pos_2d = (joint_pos_2d_hom[:, :2] /
+                    joint_pos_2d_hom[:, 2][:, None, :])
+    return joint_pos_2d
+
+
 @generator_decorator
 def monocular_2d_proj_generator(u, consts):
     """Generate monocular 2D joint position projections.

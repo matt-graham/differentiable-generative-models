@@ -8,6 +8,11 @@ import theano as th
 import theano.tensor as tt
 import theano.tensor.nlinalg as nla
 import logging
+try:
+    from choldate import cholupdate
+    choldate_available = True
+except ImportError:
+    choldate_available = False
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +36,34 @@ def scipy_calc_gram_chol(jac):
     return la.cho_factor(jac.dot(jac.T))
 
 
+def choldate_calc_gram_chol(jac):
+    """Calculate Cholesky factor of Jacobian Gram matrix using choldate.
+
+    This is **only** valid for generators in which the Jacobian J has a
+    block structure [A | B] where B is lower triangular (or diagonal). The
+    product is equal to A.dot(A.T) + B.dot(B.T) and so if B is triangular
+    and A.dot(A.T) is low-rank (A has more rows than columns) then the
+    Cholesky of J.dot(J.T) can be more efficiently computed in this case
+    by performing low-rank Cholesky updates of B by the columns of A.
+    """
+    if choldate_available:
+        gram_chol = jac[:, -jac.shape[0]:].T * 1.
+        for col in jac[:, :-jac.shape[0]].T:
+            cholupdate(gram_chol, col.copy())
+        return gram_chol, False
+    else:
+        logger.warn('choldate not installed falling back to SciPy cho_factor.')
+        return scipy_calc_gram_chol(jac)
+
+
 def gaussian_energy(u):
-    """Negative log of density for zero-mean, identity covariance Gaussian."""
+    """Negative log of density independent standard normal variables."""
     return 0.5 * u.dot(u)
+
+
+def logistic_energy(u):
+    """Negative log of density independent standard logistic variables."""
+    return u + 2 * tt.log1p(tt.exp(-u))
 
 
 class DifferentiableGenerativeModel(object):
@@ -215,3 +245,98 @@ class MinimalDifferentiableGenerativeModel(DifferentiableGenerativeModel):
             cache['dc_dpos_pinv'] = la.cho_solve(gram_chol, dc_dpos)
         dc_dpos_pinv = cache['dc_dpos_pinv']
         return self._energy_grad(u, dc_dpos_pinv)
+
+
+class DiagonalDifferentiableGenerativeModel(DifferentiableGenerativeModel):
+    """Wrapper class for *diagonal* differentiable generative models.
+
+    Assumes generator Jacobian J has a block structure [A | D] where D is
+    diagonal (typically corresponding to conditionally independent observed
+    variables given values of unobserved variables).
+    """
+
+    def __init__(self, generator, constants, number_dense_jacob_columns,
+                 base_energy=gaussian_energy,
+                 calc_gram_chol=choldate_calc_gram_chol):
+        """
+        Create a new differentiable generative model wrapper object.
+
+        Args:
+            generator (function): Function composed of Theano graph operations
+                corresponding to generator for the model of interest. This
+                must take two arguments. The first is a Theano tensor variable
+                corresponding to the vector of inputs (or batch of input
+                vectors, in which case first dimension should correspond to
+                the item in the batch and second dimension the output element)
+                to the generator (e.g. draws from a Gaussian base density).
+                The second is a dictionary containing any constants required
+                by the generator function (i.e. any numeric parameters of the
+                generator process that are assumed  fixed). The generator
+                *must* be able to compute both a one-dimensional vector output
+                if passed a one-dimensional vector input as its first
+                argument, and a two-dimensional matrix output corresponding to
+                a batch of output vectors (first dimension batch dimension),
+                if passed a two-dimensional matrix input (batch of input
+                vectors) as its first argument. This requirement allows a more
+                efficient Jacobian calculation when batched forward
+                propagation through the generator can be computed efficiently
+                using blocked operations.
+            constants (dict): A dictionary of containing any constants
+                required by the generator function (i.e. any parameters of the
+                generator process that are assumed fixed).
+            number_dense_jacob_columns (int): Number of columns of generator
+                Jacobian in dense block, with columns after this assumed to
+                form a (square) diagonal matrix.
+            base_energy (function): Function composed of Theano graph
+                operations which specifies energy (negative log density up to
+                an additive constant) associated with the inputs to the
+                generator. By default this will be set to the energy
+                corresponding to inputs with a zero-mean, identity covariance
+                Gaussian probability density.
+            calc_gram_chol (function): Function which computes the Cholesky
+                decomposition of a provided NumPy array corresponding to the
+                Jacobian matrix, shape (output_dim, input_dim), of the
+                generator for a particular input, i.e. matrix of partial
+                derivatives of each output with respect to each input. By
+                default this uses a `choldate` based low-rank Cholesky update
+                function.
+        """
+        self.number_dense_jacob_columns = number_dense_jacob_columns
+        super(DiagonalDifferentiableGenerativeModel, self).__init__(
+            generator, constants, base_energy, calc_gram_chol
+        )
+
+    def _compile_theano_functions(self):
+        p = self.number_dense_jacob_columns
+        u = tt.vector('u')
+        y = self.generator(u, self.constants)
+        u_rep = tt.tile(u, (p, 1))
+        y_rep = self.generator(u_rep, self.constants)
+        diag_jacob = tt.grad(tt.sum(y), u)[p:]
+        m = tt.zeros((p, u.shape[0]))
+        m = tt.set_subtensor(m[:p, :p], tt.eye(p))
+        dense_jacob = tt.Rop(y_rep, u_rep, m).T
+        energy = self.base_energy(u) + (
+            0.5 * tt.log(nla.det(
+                tt.eye(p) + (dense_jacob.T / diag_jacob**2).dot(dense_jacob)
+            )) +
+            tt.log(diag_jacob).sum()
+        )
+        energy_grad = tt.grad(energy, u)
+        dy_du = tt.join(1, dense_jacob, tt.diag(diag_jacob))
+        self.generator_func = _timed_func_compilation(
+            [u], y, 'generator function')
+        self.generator_jacob = _timed_func_compilation(
+            [u], dy_du, 'generator Jacobian')
+        self._energy_grad = _timed_func_compilation(
+            [u], energy_grad, 'energy gradient')
+        self.base_energy_func = _timed_func_compilation(
+            [u], self.base_energy(u), 'base energy function')
+
+    def energy_func(self, u, cache={}):
+        gram_chol = cache['gram_chol']
+        return (self.base_energy_func(u) +
+                np.log(gram_chol[0].diagonal()).sum())
+
+    def energy_grad(self, u, cache={}):
+        return self._energy_grad(u)
